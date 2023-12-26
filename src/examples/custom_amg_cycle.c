@@ -37,6 +37,73 @@
 #include "par_amg.h"
 #include "../parcsr_block_mv/par_csr_block_matrix.h"
 
+HYPRE_Int compute_residual(hypre_ParAMGData *amg_data, HYPRE_Int level, hypre_ParCSRMatrix **A_array, hypre_ParVector **F_array, hypre_ParVector **U_array, hypre_ParVector *Vtemp) {
+   HYPRE_Real alpha = -1.0;
+   HYPRE_Real beta = 1.0;
+   hypre_ParCSRMatrixMatvecOutOfPlace(alpha, A_array[level], U_array[level],
+                                      beta, F_array[level], Vtemp);
+   return level;
+}
+
+HYPRE_Int apply_restriction(hypre_ParAMGData *amg_data, HYPRE_Int level, hypre_ParCSRMatrix **A_array, hypre_ParVector **F_array, hypre_ParVector **U_array, hypre_ParVector *Vtemp, HYPRE_Int restri_type, hypre_ParCSRMatrix **R_array) {
+   HYPRE_Int new_level = level+1;
+   hypre_ParVectorSetZeros(U_array[new_level]);
+   HYPRE_Real alpha = 1.0;
+   HYPRE_Real beta = 0.0;
+   if (restri_type)
+   {
+      /* RL: no transpose for R */
+      hypre_ParCSRMatrixMatvec(alpha, R_array[level], Vtemp,
+                               beta, F_array[new_level]);
+   }
+   else
+   {
+      hypre_ParCSRMatrixMatvecT(alpha, R_array[level], Vtemp,
+                                beta, F_array[new_level]);
+   }
+   return new_level;
+
+}
+
+HYPRE_Int apply_prolongation(hypre_ParAMGData *amg_data, HYPRE_Int level, hypre_ParCSRMatrix **A_array, hypre_ParVector **F_array, hypre_ParVector **U_array, hypre_ParVector *Vtemp, hypre_ParCSRMatrix **P_array) {
+   HYPRE_Real alpha = 1.0;
+   HYPRE_Real beta = 1.0;
+   HYPRE_Int new_level = level-1;
+   HYPRE_Int local_size = hypre_VectorSize(hypre_ParVectorLocalVector(F_array[new_level]));
+   hypre_ParVectorSetLocalSize(Vtemp, local_size);
+   hypre_ParCSRMatrixMatvec(alpha, P_array[new_level],
+                            U_array[level],
+                            beta, U_array[new_level]);
+   hypre_ParVectorAllZeros(U_array[new_level]) = 0;
+   return new_level;
+}
+
+HYPRE_Int apply_coarse_solver(hypre_ParAMGData *amg_data, HYPRE_Int level, hypre_ParCSRMatrix **A_array, hypre_ParVector **F_array, hypre_ParVector **U_array, hypre_ParVector *Vtemp) {
+   HYPRE_Int relax_type = 9;
+   hypre_GaussElimSetup(amg_data, level, relax_type);
+   hypre_GaussElimSolve(amg_data, level, relax_type);
+}
+
+HYPRE_Int apply_smoother(hypre_ParAMGData *amg_data, HYPRE_Int level, hypre_ParCSRMatrix **A_array, hypre_ParVector **F_array, hypre_ParVector **U_array, 
+hypre_ParVector *Vtemp, hypre_ParVector *Ztemp, HYPRE_Int *CF_marker, HYPRE_Int relax_local, HYPRE_Int cycle_param, 
+HYPRE_Real relax_weight_level, HYPRE_Real omega_level, hypre_Vector *l1_norms_level)
+{
+   HYPRE_Int relax_type = 3;
+   HYPRE_Int Solve_err_flag = hypre_BoomerAMGRelaxIF(A_array[level],
+                                           F_array[level],
+                                           CF_marker,
+                                           relax_type,
+                                           relax_local,
+                                           cycle_param,
+                                           relax_weight_level,
+                                           omega_level,
+                                           l1_norms_level ? hypre_VectorData(l1_norms_level) : NULL,
+                                           U_array[level],
+                                           Vtemp,
+                                           Ztemp);
+   return level;
+}
+
 HYPRE_Int
 BoomerAMGCycle( void              *amg_vdata,
                       hypre_ParVector  **F_array,
@@ -219,14 +286,16 @@ BoomerAMGCycle( void              *amg_vdata,
    /* smoother than can have CF ordering */
 
    level = 0;
-   fine_grid = level;
-   coarse_grid = fine_grid + 1;
+   cycle_param = 1;
+   relax_points = 0;
+   relax_local = 0;
+   l1_norms_level = NULL;
 
-   local_size = hypre_VectorSize(hypre_ParVectorLocalVector(F_array[fine_grid]));
+   local_size = hypre_VectorSize(hypre_ParVectorLocalVector(F_array[level]));
    hypre_ParVectorSetLocalSize(Vtemp, local_size);
    //hypre_sprintf(nvtx_name, "%s-%d", "AMG Level", level);
    HYPRE_ANNOTATE_REGION_BEGIN("%s", "Relaxation");
-   relax_type = 3;
+   /*relax_type = 3;
    Solve_err_flag = hypre_BoomerAMGRelaxIF(A_array[level],
                                            F_array[level],
                                            CF_marker,
@@ -239,212 +308,62 @@ BoomerAMGCycle( void              *amg_vdata,
                                            U_array[level],
                                            Vtemp,
                                            Ztemp);
-
+   */
+   level = apply_smoother(amg_data, level, A_array, F_array, U_array, Vtemp, Ztemp, CF_marker, relax_local, 
+                          cycle_param, relax_weight[level], omega[level], l1_norms_level); 
    HYPRE_ANNOTATE_REGION_END("%s", "Relaxation");
 
    HYPRE_ANNOTATE_REGION_BEGIN("%s", "Residual");
-   hypre_ParVectorSetZeros(U_array[coarse_grid]);
-   alpha = -1.0;
-   beta = 1.0;
-   hypre_ParCSRMatrixMatvecOutOfPlace(alpha, A_array[fine_grid], U_array[fine_grid],
-                                      beta, F_array[fine_grid], Vtemp);
+   level = compute_residual(amg_data, level, A_array, F_array, U_array, Vtemp); 
    HYPRE_ANNOTATE_REGION_END("%s", "Residual");
 
 
    HYPRE_ANNOTATE_REGION_BEGIN("%s", "Restriction");
+   HYPRE_Int new_level = level + 1;
+   //level = apply_restriction(amg_data, level, A_array, F_array, U_array, Vtemp, restri_type, R_array); 
    alpha = 1.0;
    beta = 0.0;
    if (restri_type)
    {
-      /* RL: no transpose for R */
-      hypre_ParCSRMatrixMatvec(alpha, R_array[fine_grid], Vtemp,
-                               beta, F_array[coarse_grid]);
+      hypre_ParCSRMatrixMatvec(alpha, R_array[level], Vtemp,
+                               beta, F_array[new_level]);
    }
    else
    {
-      hypre_ParCSRMatrixMatvecT(alpha, R_array[fine_grid], Vtemp,
-                                beta, F_array[coarse_grid]);
+      hypre_ParCSRMatrixMatvecT(alpha, R_array[level], Vtemp,
+                                beta, F_array[new_level]);
    }
-   HYPRE_ANNOTATE_REGION_END("%s", "Restriction");
-   fine_grid = coarse_grid;
-   coarse_grid = coarse_grid + 1; 
-   local_size = hypre_VectorSize(hypre_ParVectorLocalVector(F_array[fine_grid]));
+   hypre_ParVectorSetZeros(U_array[new_level]);
+   local_size = hypre_VectorSize(hypre_ParVectorLocalVector(F_array[level]));
    hypre_ParVectorSetLocalSize(Vtemp, local_size);
-
-
-   /*   
-   HYPRE_ANNOTATE_REGION_BEGIN("%s", "Residual");
-   hypre_ParVectorSetZeros(U_array[coarse_grid]);
-   alpha = -1.0;
-   beta = 1.0;
-   hypre_ParCSRMatrixMatvecOutOfPlace(alpha, A_array[fine_grid], U_array[fine_grid],
-                                      beta, F_array[fine_grid], Vtemp);
-   HYPRE_ANNOTATE_REGION_END("%s", "Residual");
-
-
-   HYPRE_ANNOTATE_REGION_BEGIN("%s", "Restriction");
-   alpha = 1.0;
-   beta = 0.0;
-   if (restri_type)
-   {
-      hypre_ParCSRMatrixMatvec(alpha, R_array[fine_grid], Vtemp,
-                               beta, F_array[coarse_grid]);
-   }
-   else
-   {
-      hypre_ParCSRMatrixMatvecT(alpha, R_array[fine_grid], Vtemp,
-                                beta, F_array[coarse_grid]);
-   }
    HYPRE_ANNOTATE_REGION_END("%s", "Restriction");
-   fine_grid = coarse_grid;
-   coarse_grid = coarse_grid + 1; 
-   local_size = hypre_VectorSize(hypre_ParVectorLocalVector(F_array[fine_grid]));
-   hypre_ParVectorSetLocalSize(Vtemp, local_size);
-
-   HYPRE_ANNOTATE_REGION_BEGIN("%s", "Residual");
-   hypre_ParVectorSetZeros(U_array[coarse_grid]);
-   alpha = -1.0;
-   beta = 1.0;
-   hypre_ParCSRMatrixMatvecOutOfPlace(alpha, A_array[fine_grid], U_array[fine_grid],
-                                      beta, F_array[fine_grid], Vtemp);
-   HYPRE_ANNOTATE_REGION_END("%s", "Residual");
-
-
-   HYPRE_ANNOTATE_REGION_BEGIN("%s", "Restriction");
-   alpha = 1.0;
-   beta = 0.0;
-   if (restri_type)
-   {
-      hypre_ParCSRMatrixMatvec(alpha, R_array[fine_grid], Vtemp,
-                               beta, F_array[coarse_grid]);
-   }
-   else
-   {
-      hypre_ParCSRMatrixMatvecT(alpha, R_array[fine_grid], Vtemp,
-                                beta, F_array[coarse_grid]);
-   }
-   HYPRE_ANNOTATE_REGION_END("%s", "Restriction");
-   fine_grid = coarse_grid;
-   coarse_grid = coarse_grid + 1; 
-   local_size = hypre_VectorSize(hypre_ParVectorLocalVector(F_array[fine_grid]));
-   hypre_ParVectorSetLocalSize(Vtemp, local_size);
-
-   HYPRE_ANNOTATE_REGION_BEGIN("%s", "Residual");
-   hypre_ParVectorSetZeros(U_array[coarse_grid]);
-   alpha = -1.0;
-   beta = 1.0;
-   hypre_ParCSRMatrixMatvecOutOfPlace(alpha, A_array[fine_grid], U_array[fine_grid],
-                                      beta, F_array[fine_grid], Vtemp);
-   HYPRE_ANNOTATE_REGION_END("%s", "Residual");
-
-
-   HYPRE_ANNOTATE_REGION_BEGIN("%s", "Restriction");
-   alpha = 1.0;
-   beta = 0.0;
-   if (restri_type)
-   {
-      hypre_ParCSRMatrixMatvec(alpha, R_array[fine_grid], Vtemp,
-                               beta, F_array[coarse_grid]);
-   }
-   else
-   {
-      hypre_ParCSRMatrixMatvecT(alpha, R_array[fine_grid], Vtemp,
-                                beta, F_array[coarse_grid]);
-   }
-   HYPRE_ANNOTATE_REGION_END("%s", "Restriction");
-   fine_grid = coarse_grid;
-   coarse_grid = coarse_grid + 1; 
-   local_size = hypre_VectorSize(hypre_ParVectorLocalVector(F_array[fine_grid]));
-   hypre_ParVectorSetLocalSize(Vtemp, local_size);
-   */
-
+   level = new_level;
    HYPRE_ANNOTATE_REGION_BEGIN("%s", "Coarse Solve");
    //hypre_seqAMGCycle(amg_data, fine_grid, F_array, U_array);
    relax_type = 9;
-   hypre_GaussElimSetup(amg_data, fine_grid, relax_type);
-   hypre_GaussElimSolve(amg_data, fine_grid, relax_type);
-   
+   hypre_GaussElimSetup(amg_data, level, relax_type);
+   hypre_GaussElimSolve(amg_data, level, relax_type);
+   //level = apply_coarse_solver(amg_data, level, A_array, F_array, U_array, Vtemp);  
    HYPRE_ANNOTATE_REGION_END("%s", "Coarse Solve");
-   coarse_grid = fine_grid;
-   fine_grid = fine_grid - 1;
-   local_size = hypre_VectorSize(hypre_ParVectorLocalVector(F_array[fine_grid]));
-   hypre_ParVectorSetLocalSize(Vtemp, local_size);
 
    HYPRE_ANNOTATE_REGION_BEGIN("%s", "Interpolation");
-   alpha = 1.0;
-   beta = 1.0;
-   hypre_ParCSRMatrixMatvec(alpha, P_array[fine_grid],
-                            U_array[coarse_grid],
-                            beta, U_array[fine_grid]);
-
-   hypre_ParVectorAllZeros(U_array[fine_grid]) = 0;
-
-   HYPRE_ANNOTATE_REGION_END("%s", "Interpolation");
-   /*
-   coarse_grid = fine_grid;
-   fine_grid = fine_grid - 1;
-   local_size = hypre_VectorSize(hypre_ParVectorLocalVector(F_array[fine_grid]));
+   //level = apply_prolongation(amg_data, level, A_array, F_array, U_array, Vtemp, P_array); 
+   new_level = level - 1;
+   local_size = hypre_VectorSize(hypre_ParVectorLocalVector(F_array[new_level]));
    hypre_ParVectorSetLocalSize(Vtemp, local_size);
-
-   HYPRE_ANNOTATE_REGION_BEGIN("%s", "Interpolation");
    alpha = 1.0;
    beta = 1.0;
-   hypre_ParCSRMatrixMatvec(alpha, P_array[fine_grid],
-                            U_array[coarse_grid],
-                            beta, U_array[fine_grid]);
+   hypre_ParCSRMatrixMatvec(alpha, P_array[new_level],
+                            U_array[level],
+                            beta, U_array[new_level]);
 
-   hypre_ParVectorAllZeros(U_array[fine_grid]) = 0;
-
+   hypre_ParVectorAllZeros(U_array[new_level]) = 0;  
    HYPRE_ANNOTATE_REGION_END("%s", "Interpolation");
-   coarse_grid = fine_grid;
-   fine_grid = fine_grid - 1;
-   local_size = hypre_VectorSize(hypre_ParVectorLocalVector(F_array[fine_grid]));
-   hypre_ParVectorSetLocalSize(Vtemp, local_size);
-
-   HYPRE_ANNOTATE_REGION_BEGIN("%s", "Interpolation");
-   alpha = 1.0;
-   beta = 1.0;
-   hypre_ParCSRMatrixMatvec(alpha, P_array[fine_grid],
-                            U_array[coarse_grid],
-                            beta, U_array[fine_grid]);
-
-   hypre_ParVectorAllZeros(U_array[fine_grid]) = 0;
-
-   HYPRE_ANNOTATE_REGION_END("%s", "Interpolation");
-   coarse_grid = fine_grid;
-   fine_grid = fine_grid - 1;
-   local_size = hypre_VectorSize(hypre_ParVectorLocalVector(F_array[fine_grid]));
-   hypre_ParVectorSetLocalSize(Vtemp, local_size);
-
-   HYPRE_ANNOTATE_REGION_BEGIN("%s", "Interpolation");
-   alpha = 1.0;
-   beta = 1.0;
-   hypre_ParCSRMatrixMatvec(alpha, P_array[fine_grid],
-                            U_array[coarse_grid],
-                            beta, U_array[fine_grid]);
-
-   hypre_ParVectorAllZeros(U_array[fine_grid]) = 0;
-
-   HYPRE_ANNOTATE_REGION_END("%s", "Interpolation");
-   */
-   
-
-
-
+   level = new_level;
    HYPRE_ANNOTATE_REGION_BEGIN("%s", "Relaxation");
-   relax_type = 3;
-   Solve_err_flag = hypre_BoomerAMGRelaxIF(A_array[level],
-                                           F_array[level],
-                                           CF_marker,
-                                           relax_type,
-                                           relax_local,
-                                           cycle_param,
-                                           relax_weight[level],
-                                           omega[level],
-                                           l1_norms_level ? hypre_VectorData(l1_norms_level) : NULL,
-                                           U_array[level],
-                                           Vtemp,
-                                           Ztemp);
+   level = apply_smoother(amg_data, level, A_array, F_array, U_array, Vtemp, Ztemp, CF_marker, relax_local, 
+                          cycle_param, relax_weight[level], omega[level], l1_norms_level); 
+   HYPRE_ANNOTATE_REGION_END("%s", "Relaxation");
 
 
    HYPRE_ANNOTATE_FUNC_END;
