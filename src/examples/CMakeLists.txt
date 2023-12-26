@@ -21,6 +21,7 @@ set(EXAMPLE_SRCS
   ex16.c
   ex17.c
   ex18.c
+  custom_amg_cycle.c
 )
 
 if (HYPRE_BIGINT)
