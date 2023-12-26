@@ -1,0 +1,6 @@
+    {
+        "cmake.configureSettings": {
+            "HYPRE_BUILD_EXAMPLES": "ON"
+        },
+        "cmake.sourceDirectory": "/home/jonas/Projects/hypre/src"
+    }
