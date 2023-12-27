@@ -6,22 +6,18 @@
  ******************************************************************************/
 
 /*
-   Example 5
-
    Interface:    Linear-Algebraic (IJ)
 
-   Compile with: make ex5
+   Compile with: make custom_amg_cycle
 
-   Sample run:   mpirun -np 4 ex5
+   Sample run:   mpirun -np 4 custom_amg_cycle
 
    Description:  This example solves the 2-D Laplacian problem with zero boundary
                  conditions on an n x n grid.  The number of unknowns is N=n^2.
                  The standard 5-point stencil is used, and we solve for the
                  interior nodes only.
 
-                 This example solves the same problem as Example 3.  Available
-                 solvers are AMG, PCG, and PCG with AMG or Parasails
-                 preconditioners.  */
+                 This code solves the same problem as Example 3 and 5.*/
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,14 +34,17 @@
 #include "../parcsr_block_mv/par_csr_block_matrix.h"
 
 HYPRE_Int compute_residual(hypre_ParAMGData *amg_data, HYPRE_Int level, hypre_ParCSRMatrix **A_array, hypre_ParVector **F_array, hypre_ParVector **U_array, hypre_ParVector *Vtemp) {
+   HYPRE_ANNOTATE_REGION_BEGIN("%s", "Residual");
    HYPRE_Real alpha = -1.0;
    HYPRE_Real beta = 1.0;
    hypre_ParCSRMatrixMatvecOutOfPlace(alpha, A_array[level], U_array[level],
                                       beta, F_array[level], Vtemp);
+   HYPRE_ANNOTATE_REGION_END("%s", "Residual");
    return level;
 }
 
 HYPRE_Int apply_restriction(hypre_ParAMGData *amg_data, HYPRE_Int level, hypre_ParCSRMatrix **A_array, hypre_ParVector **F_array, hypre_ParVector **U_array, hypre_ParVector *Vtemp, HYPRE_Int restri_type, hypre_ParCSRMatrix **R_array) {
+   HYPRE_ANNOTATE_REGION_BEGIN("%s", "Restriction");
    HYPRE_Int new_level = level+1;
    hypre_ParVectorSetZeros(U_array[new_level]);
    HYPRE_Real alpha = 1.0;
@@ -61,33 +60,39 @@ HYPRE_Int apply_restriction(hypre_ParAMGData *amg_data, HYPRE_Int level, hypre_P
       hypre_ParCSRMatrixMatvecT(alpha, R_array[level], Vtemp,
                                 beta, F_array[new_level]);
    }
+   HYPRE_ANNOTATE_REGION_END("%s", "Restriction");
    return new_level;
 
 }
 
 HYPRE_Int apply_prolongation(hypre_ParAMGData *amg_data, HYPRE_Int level, hypre_ParCSRMatrix **A_array, hypre_ParVector **F_array, hypre_ParVector **U_array, hypre_ParVector *Vtemp, hypre_ParCSRMatrix **P_array) {
+   HYPRE_ANNOTATE_REGION_BEGIN("%s", "Interpolation");
    HYPRE_Real alpha = 1.0;
    HYPRE_Real beta = 1.0;
    HYPRE_Int new_level = level-1;
-   HYPRE_Int local_size = hypre_VectorSize(hypre_ParVectorLocalVector(F_array[new_level]));
-   hypre_ParVectorSetLocalSize(Vtemp, local_size);
    hypre_ParCSRMatrixMatvec(alpha, P_array[new_level],
                             U_array[level],
                             beta, U_array[new_level]);
    hypre_ParVectorAllZeros(U_array[new_level]) = 0;
+   HYPRE_Int local_size = hypre_VectorSize(hypre_ParVectorLocalVector(F_array[new_level]));
+   hypre_ParVectorSetLocalSize(Vtemp, local_size);
+   HYPRE_ANNOTATE_REGION_END("%s", "Interpolation");
    return new_level;
 }
 
 HYPRE_Int apply_coarse_solver(hypre_ParAMGData *amg_data, HYPRE_Int level, hypre_ParCSRMatrix **A_array, hypre_ParVector **F_array, hypre_ParVector **U_array, hypre_ParVector *Vtemp) {
+   HYPRE_ANNOTATE_REGION_BEGIN("%s", "Coarse Solve");
    HYPRE_Int relax_type = 9;
    hypre_GaussElimSetup(amg_data, level, relax_type);
    hypre_GaussElimSolve(amg_data, level, relax_type);
+   HYPRE_ANNOTATE_REGION_END("%s", "Coarse Solve");
+   return level;
 }
 
 HYPRE_Int apply_smoother(hypre_ParAMGData *amg_data, HYPRE_Int level, hypre_ParCSRMatrix **A_array, hypre_ParVector **F_array, hypre_ParVector **U_array, 
 hypre_ParVector *Vtemp, hypre_ParVector *Ztemp, HYPRE_Int *CF_marker, HYPRE_Int relax_local, HYPRE_Int cycle_param, 
-HYPRE_Real relax_weight_level, HYPRE_Real omega_level, hypre_Vector *l1_norms_level)
-{
+HYPRE_Real relax_weight_level, HYPRE_Real omega_level, hypre_Vector *l1_norms_level) {
+   HYPRE_ANNOTATE_REGION_BEGIN("%s", "Relaxation");
    HYPRE_Int relax_type = 3;
    HYPRE_Int Solve_err_flag = hypre_BoomerAMGRelaxIF(A_array[level],
                                            F_array[level],
@@ -101,6 +106,7 @@ HYPRE_Real relax_weight_level, HYPRE_Real omega_level, hypre_Vector *l1_norms_le
                                            U_array[level],
                                            Vtemp,
                                            Ztemp);
+   HYPRE_ANNOTATE_REGION_END("%s", "Relaxation");
    return level;
 }
 
@@ -194,7 +200,6 @@ BoomerAMGCycle( void              *amg_vdata,
 #endif
 
    HYPRE_ANNOTATE_FUNC_BEGIN;
-   hypre_GpuProfilingPushRange("AMGCycle");
 
    /* Acquire data and allocate storage */
    A_array           = hypre_ParAMGDataAArray(amg_data);
@@ -258,33 +263,6 @@ BoomerAMGCycle( void              *amg_vdata,
       num_coeffs[j] = hypre_ParCSRMatrixDNumNonzeros(A_array[j]);
    }
 
-   /*---------------------------------------------------------------------
-    *    Initialize cycling control counter
-    *
-    *     Cycling is controlled using a level counter: lev_counter[k]
-    *
-    *     Each time relaxation is performed on level k, the
-    *     counter is decremented by 1. If the counter is then
-    *     negative, we go to the next finer level. If non-
-    *     negative, we go to the next coarser level. The
-    *     following actions control cycling:
-    *
-    *     a. lev_counter[0] is initialized to 1.
-    *     b. lev_counter[k] is initialized to cycle_type for k>0.
-    *
-    *     c. During cycling, when going down to level k, lev_counter[k]
-    *        is set to the max of (lev_counter[k],cycle_type)
-    *---------------------------------------------------------------------*/
-
-   /*---------------------------------------------------------------------
-    * Main loop of cycling
-    *--------------------------------------------------------------------*/
-   // CGS
-   /* Gaussian elimination */
-   // relax type: 9
-   // hypre_GaussElimSolve(amg_data, level, relax_type);
-   /* smoother than can have CF ordering */
-
    level = 0;
    cycle_param = 1;
    relax_points = 0;
@@ -294,81 +272,24 @@ BoomerAMGCycle( void              *amg_vdata,
    local_size = hypre_VectorSize(hypre_ParVectorLocalVector(F_array[level]));
    hypre_ParVectorSetLocalSize(Vtemp, local_size);
    //hypre_sprintf(nvtx_name, "%s-%d", "AMG Level", level);
-   HYPRE_ANNOTATE_REGION_BEGIN("%s", "Relaxation");
-   /*relax_type = 3;
-   Solve_err_flag = hypre_BoomerAMGRelaxIF(A_array[level],
-                                           F_array[level],
-                                           CF_marker,
-                                           relax_type,
-                                           relax_local,
-                                           cycle_param,
-                                           relax_weight[level],
-                                           omega[level],
-                                           l1_norms_level ? hypre_VectorData(l1_norms_level) : NULL,
-                                           U_array[level],
-                                           Vtemp,
-                                           Ztemp);
-   */
    level = apply_smoother(amg_data, level, A_array, F_array, U_array, Vtemp, Ztemp, CF_marker, relax_local, 
                           cycle_param, relax_weight[level], omega[level], l1_norms_level); 
-   HYPRE_ANNOTATE_REGION_END("%s", "Relaxation");
 
-   HYPRE_ANNOTATE_REGION_BEGIN("%s", "Residual");
    level = compute_residual(amg_data, level, A_array, F_array, U_array, Vtemp); 
-   HYPRE_ANNOTATE_REGION_END("%s", "Residual");
 
 
-   HYPRE_ANNOTATE_REGION_BEGIN("%s", "Restriction");
-   HYPRE_Int new_level = level + 1;
-   //level = apply_restriction(amg_data, level, A_array, F_array, U_array, Vtemp, restri_type, R_array); 
-   alpha = 1.0;
-   beta = 0.0;
-   if (restri_type)
-   {
-      hypre_ParCSRMatrixMatvec(alpha, R_array[level], Vtemp,
-                               beta, F_array[new_level]);
-   }
-   else
-   {
-      hypre_ParCSRMatrixMatvecT(alpha, R_array[level], Vtemp,
-                                beta, F_array[new_level]);
-   }
-   hypre_ParVectorSetZeros(U_array[new_level]);
-   local_size = hypre_VectorSize(hypre_ParVectorLocalVector(F_array[level]));
-   hypre_ParVectorSetLocalSize(Vtemp, local_size);
-   HYPRE_ANNOTATE_REGION_END("%s", "Restriction");
-   level = new_level;
-   HYPRE_ANNOTATE_REGION_BEGIN("%s", "Coarse Solve");
-   //hypre_seqAMGCycle(amg_data, fine_grid, F_array, U_array);
-   relax_type = 9;
-   hypre_GaussElimSetup(amg_data, level, relax_type);
-   hypre_GaussElimSolve(amg_data, level, relax_type);
-   //level = apply_coarse_solver(amg_data, level, A_array, F_array, U_array, Vtemp);  
-   HYPRE_ANNOTATE_REGION_END("%s", "Coarse Solve");
+   level = apply_restriction(amg_data, level, A_array, F_array, U_array, Vtemp, restri_type, R_array); 
 
-   HYPRE_ANNOTATE_REGION_BEGIN("%s", "Interpolation");
-   //level = apply_prolongation(amg_data, level, A_array, F_array, U_array, Vtemp, P_array); 
-   new_level = level - 1;
-   local_size = hypre_VectorSize(hypre_ParVectorLocalVector(F_array[new_level]));
-   hypre_ParVectorSetLocalSize(Vtemp, local_size);
-   alpha = 1.0;
-   beta = 1.0;
-   hypre_ParCSRMatrixMatvec(alpha, P_array[new_level],
-                            U_array[level],
-                            beta, U_array[new_level]);
+   level = apply_coarse_solver(amg_data, level, A_array, F_array, U_array, Vtemp);  
 
-   hypre_ParVectorAllZeros(U_array[new_level]) = 0;  
-   HYPRE_ANNOTATE_REGION_END("%s", "Interpolation");
-   level = new_level;
-   HYPRE_ANNOTATE_REGION_BEGIN("%s", "Relaxation");
+   level = apply_prolongation(amg_data, level, A_array, F_array, U_array, Vtemp, P_array); 
+
    level = apply_smoother(amg_data, level, A_array, F_array, U_array, Vtemp, Ztemp, CF_marker, relax_local, 
                           cycle_param, relax_weight[level], omega[level], l1_norms_level); 
-   HYPRE_ANNOTATE_REGION_END("%s", "Relaxation");
-
 
    HYPRE_ANNOTATE_FUNC_END;
 
-return (Solve_err_flag);
+   return (Solve_err_flag);
 }
 
 HYPRE_Int
